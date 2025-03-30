@@ -1,0 +1,78 @@
+# --------------------------------------------------------------------
+# STM32CubeIDE Project & Build Artifacts
+# --------------------------------------------------------------------
+
+# Ignore IDE build output
+Debug/
+Release/
+build/
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.out
+
+# Compiler/intermediate files
+*.o
+*.d
+*.su
+
+# CubeIDE-specific logs
+.build_log.html
+build.log
+
+# Auto-generated object files (but keep source)
+**/*.o
+**/*.d
+**/*.su
+
+# --------------------------------------------------------------------
+# STM32CubeIDE Project Files — KEEP these
+# --------------------------------------------------------------------
+
+!.project
+!.cproject
+!.mxproject
+!*.ioc
+
+# --------------------------------------------------------------------
+# Auto-generated ST middleware and drivers — Keep source, ignore junk
+# --------------------------------------------------------------------
+
+# Exclude only the parts we don't want (like object files above)
+
+# Keep auto-generated driver and middleware source
+!Drivers/STM32H5xx_HAL_Driver/**/*.c
+!Drivers/STM32H5xx_HAL_Driver/**/*.h
+!Drivers/CMSIS/**/*.c
+!Drivers/CMSIS/**/*.h
+!Middlewares/ST/**/*.c
+!Middlewares/ST/**/*.h
+
+# --------------------------------------------------------------------
+# Configuration Files with Sensitive Data
+# use the <filename>_template.h for the template and change
+# the sensitive data locally.
+# --------------------------------------------------------------------
+
+# --------------------------------------------------------------------
+# IDE & System Metadata
+# --------------------------------------------------------------------
+
+# Eclipse/CubeIDE metadata
+.settings/
+.metadata/
+*.log
+
+# macOS
+.DS_Store
+
+# VSCode (optional)
+.vscode/
+
+# Python virtualenv (if you use scripts/tools)
+venv/
+*.pyc
+__pycache__/
+
