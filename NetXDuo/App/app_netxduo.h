@@ -75,14 +75,14 @@ UINT MX_NetXDuo_Init(VOID *memory_ptr);
 /* Private defines -----------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define DEFAULT_MEMORY_SIZE              1024
+#define DEFAULT_MEMORY_SIZE              4096U
 #define TOGGLE_LED_PRIORITY              15
 #define DEFAULT_PRIORITY                 5
 #define LINK_PRIORITY                    11
  /*Packet payload size */
-#define PACKET_PAYLOAD_SIZE              1536
+#define PACKET_PAYLOAD_SIZE              1536U
  /* APP Cache size  */
-#define ARP_CACHE_SIZE                   1024
+#define ARP_CACHE_SIZE                   1024U
  /* Wait option for getting @IP */
 #define WAIT_OPTION                      1000
 /* Entry input for Main thread */
@@ -92,30 +92,39 @@ UINT MX_NetXDuo_Init(VOID *memory_ptr);
 /* Main Thread preemption threshold */
 #define THREAD_PREEMPT_THRESHOLD         4
 /* Web application size */
-#define WEB_APP_SIZE                     2048
+#define WEB_APP_SIZE                     2048U
 /* Memory size */
-#define MEMORY_SIZE                      2048
-/* HTTP connection port */
-#define CONNECTION_PORT                  80
-/* Server packet size */
-#define SERVER_PACKET_SIZE               (NX_WEB_HTTP_SERVER_MIN_PACKET_SIZE * 2)
+#define MEMORY_SIZE                      2048U
+// NetX Duo overhead per packet (NX_PACKET plus alignment slop)
+#define NX_PACKET_METADATA_SIZE         (sizeof(NX_PACKET) + 4)
+/* Size of the client packets, should match the DEFAULT_PAYLOAD_SIZE */
+#define NX_PACKET_HEADER_SIZE 			 48U
+#define	CLIENT_PACKET_SIZE	             1536U
+/* The size of the client pool needed for HTTPS/TLS */
+#define CLIENT_PACKET_COUNT              12
+#define CLIENT_POOL_SIZE       			(CLIENT_PACKET_COUNT * (CLIENT_PACKET_SIZE + sizeof(NX_PACKET)))
 /* Server stack */
-#define SERVER_STACK                     4096
-/* Server pool size */
-#define SERVER_POOL_SIZE                 (SERVER_PACKET_SIZE * 4)
+#define CLIENT_STACK                     4096
 /* SD Driver information pointer */
 #define SD_DRIVER_INFO_POINTER           0
 #define NULL_IP_ADDRESS                  IP_ADDRESS(0,0,0,0)
 #define NX_APP_CABLE_CONNECTION_CHECK_PERIOD  (1 * NX_IP_PERIODIC_RATE)
+#define NX_WEB_HTTP_PORT				 80
+#define NX_WEB_HTTPS_PORT				 443
+#define DHCP_TIMEOUT 					 30000
+#define DNS_PACKET_SIZE 				 512
+#define DNS_POOL_PACKET_COUNT           4
+#define DNS_POOL_SIZE                   (DNS_POOL_PACKET_COUNT * (DNS_PACKET_SIZE + NX_PACKET_HEADER_SIZE))
+
 /* USER CODE END PD */
 
 #define NX_APP_DEFAULT_TIMEOUT               (10 * NX_IP_PERIODIC_RATE)
 
 #define NX_APP_PACKET_POOL_SIZE              ((DEFAULT_PAYLOAD_SIZE + sizeof(NX_PACKET)) * 50)
 
-#define NX_APP_THREAD_STACK_SIZE             2 * 1024
+#define NX_APP_THREAD_STACK_SIZE             (4 * 1024)
 
-#define Nx_IP_INSTANCE_THREAD_SIZE           2 * 1024
+#define Nx_IP_INSTANCE_THREAD_SIZE           (4 * 1024)
 
 #define NX_APP_THREAD_PRIORITY               10
 

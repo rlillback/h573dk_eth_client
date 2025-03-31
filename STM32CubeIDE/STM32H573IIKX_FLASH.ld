@@ -44,8 +44,9 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 /* Memories definition */
 MEMORY
 {
-  RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 640K
-  FLASH    (rx)    : ORIGIN = 0x08000000,   LENGTH = 2048K
+  RAM       (xrw)  : ORIGIN = 0x20000000, LENGTH = 608K   /* Main RAM */
+  POOL_AREA (xrw)  : ORIGIN = 0x20078000 , LENGTH = 32K    /* Dedicated buffer region */
+  FLASH     (rx)   : ORIGIN = 0x08000000, LENGTH = 2048K
 }
 
 /* Sections */
@@ -163,6 +164,12 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM
+  .client_packet_pool_area :
+  {
+    . = ALIGN(32);
+    KEEP(*(.client_packet_pool_area))
+  } >POOL_AREA
+
 
   /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
   ._user_heap_stack :
