@@ -41,6 +41,7 @@
 #include "stm32h5xx_hal_rcc.h"
 #include "stm32h5xx_hal_cortex.h"
 #include "stm32h5xx_hal_uart.h"
+#include "https_client.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,6 +52,8 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define NX_DHCP_OPTION_ROUTER 3
+// Define this if you only want to use HTTP and not HTTPS
+#undef __HTTP_ONLY__
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -118,14 +121,19 @@ void print_pool_state(NX_PACKET_POOL *pool, const char *label);
 void check_memory_clobber (UCHAR *packet_pool_area, int pool_size, const char *label);
 void print_packet_pool_structure(NX_PACKET_POOL *pool);
 static UINT resolve_hostname(CHAR *host_name, ULONG *resolved_ip);
-static UINT create_http_client(void);
-static VOID print_gateway_mac(void);
-static UINT tcp_socket_setup(NX_TCP_SOCKET *socket, ULONG resolved_ip);
+static UINT tcp_socket_setup(NX_TCP_SOCKET *socket, ULONG resolved_ip, UINT port);
+
+#ifdef __HTTP_ONLY__
 static UINT send_http_get(NX_TCP_SOCKET *socket, CHAR *host_name, CHAR *resource_path);
 static UINT receive_http_response(NX_TCP_SOCKET *socket, CHAR *receive_buffer, ULONG buffer_size);
+static VOID print_gateway_mac(void);
+static UINT create_http_client(void);
+static CHAR *find_http_body_start(CHAR *buffer);
 static UINT extract_packet_to_buffer(NX_PACKET *packet, CHAR *buffer, ULONG *offset, ULONG max_size);
 static ULONG parse_content_length(const CHAR *headers);
-static CHAR *find_http_body_start(CHAR *buffer);
+#endif
+
+
 /* Init Function Prototypes */
 static void log_thread_priorities(void);
 static UINT create_client_packet_pool(void);
@@ -319,6 +327,7 @@ static VOID nx_app_thread_entry (ULONG thread_input)
 
 
 /* USER CODE BEGIN 1 */
+#ifdef __HTTP_ONLY__
 static VOID nx_client_thread_entry(ULONG thread_input)
 {
     NX_TCP_SOCKET socket;
@@ -333,7 +342,7 @@ static VOID nx_client_thread_entry(ULONG thread_input)
     if (create_http_client() != NX_SUCCESS) Error_Handler();
     print_gateway_mac();
 
-    if (tcp_socket_setup(&socket, ip) != NX_SUCCESS) {
+    if (tcp_socket_setup(&socket, ip, NX_WEB_HTTP_PORT) != NX_SUCCESS) {
         printf("TCP connection failed.\r\n");
         Error_Handler();
     }
@@ -360,6 +369,44 @@ static VOID nx_client_thread_entry(ULONG thread_input)
         tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
     }
 } /* nx_client_thread_entry */
+#else
+static VOID nx_client_thread_entry(ULONG thread_input)
+{
+    printf("Entered nx_client_thread_entry...\r\n");
+
+    ULONG ip;
+    CHAR *host = "httpbin.org";
+    CHAR *path = "/get";
+
+    if (resolve_hostname(host, &ip) != NX_SUCCESS) {
+        printf("DNS resolution failed.\r\n");
+        Error_Handler();
+    }
+
+    NX_TCP_SOCKET socket;
+    if (tcp_socket_setup(&socket, ip, NX_WEB_HTTPS_PORT) != NX_SUCCESS) {
+        printf("TCP socket setup failed.\r\n");
+        Error_Handler();
+    }
+
+    if (https_client_get(&socket, host, path) != 0) {
+        printf("HTTPS GET request failed.\r\n");
+        Error_Handler();
+    }
+
+    nx_tcp_socket_disconnect(&socket, NX_IP_PERIODIC_RATE);
+    nx_tcp_client_socket_unbind(&socket);
+    nx_tcp_socket_delete(&socket);
+
+    printf("HTTPS GET completed successfully.\r\n");
+    tx_thread_resume(&LedThread);
+
+    while (1) {
+        tx_thread_sleep(TX_TIMER_TICKS_PER_SECOND);
+    }
+}
+
+#endif
 
 /**
  * @brief  Toggle the green LED every 1/2 second
@@ -708,29 +755,7 @@ static UINT resolve_hostname(CHAR *host_name, ULONG *resolved_ip)
     return NX_SUCCESS;
 } /* resolve_hostname */
 
-static UINT create_http_client(void)
-{
-	printf("create_http_client entered...\r\n");
-    UINT status = nx_web_http_client_create(&HTTPClient, "HTTP Client", &NetXDuoEthIpInstance, &ClientPacketPool, NX_WAIT_FOREVER);
-    if (status != NX_SUCCESS) {
-        printf("HTTP client create failed: 0x%02X\r\n", status);
-        return status;
-    }
-    return NX_SUCCESS;
-} /* create_http_client */
-
-static VOID print_gateway_mac(void)
-{
-    ULONG gw_ip, msw, lsw;
-    if (nx_ip_gateway_address_get(&NetXDuoEthIpInstance, &gw_ip) == NX_SUCCESS &&
-        nx_arp_hardware_address_find(&NetXDuoEthIpInstance, gw_ip, &msw, &lsw) == NX_SUCCESS) {
-        printf("Gateway MAC: %08lX:%08lX\r\n", msw, lsw);
-    } else {
-        printf("Could not resolve gateway MAC.\r\n");
-    }
-} /* print_gateway_mac */
-
-static UINT tcp_socket_setup(NX_TCP_SOCKET *socket, ULONG resolved_ip)
+static UINT tcp_socket_setup(NX_TCP_SOCKET *socket, ULONG resolved_ip, UINT port)
 {
 	printf("tcp_socket_setup entered...\r\n");
     UINT status;
@@ -742,119 +767,9 @@ static UINT tcp_socket_setup(NX_TCP_SOCKET *socket, ULONG resolved_ip)
     if (status != NX_SUCCESS) return status;
 
     NXD_ADDRESS addr = { .nxd_ip_version = NX_IP_VERSION_V4, .nxd_ip_address.v4 = resolved_ip };
-    status = nxd_tcp_client_socket_connect(socket, &addr, NX_WEB_HTTP_PORT, 5 * NX_IP_PERIODIC_RATE);
+    status = nxd_tcp_client_socket_connect(socket, &addr, port, 5 * NX_IP_PERIODIC_RATE);
     return status;
 } /* tcp_socket_setup */
-
-static UINT send_http_get(NX_TCP_SOCKET *socket, CHAR *host_name, CHAR *resource_path)
-{
-	printf("send_http_get entered...\r\n");
-    NX_PACKET *send_packet;
-    char request[1024];
-
-    snprintf(request,
-    		sizeof(request),
-            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: nxd_tcp_client/1.0.0\r\nAccept: */*\r\n\r\n",
-            resource_path,
-			host_name);
-
-    UINT status = nx_packet_allocate(NetXDuoEthIpInstance.nx_ip_default_packet_pool,
-                                     &send_packet, NX_TCP_PACKET, NX_WAIT_FOREVER);
-    if (status != NX_SUCCESS) return status;
-
-    status = nx_packet_data_append(send_packet, request, strlen(request),
-                                   NetXDuoEthIpInstance.nx_ip_default_packet_pool, NX_WAIT_FOREVER);
-    if (status != NX_SUCCESS) {
-        nx_packet_release(send_packet);
-        return status;
-    }
-
-    return nx_tcp_socket_send(socket, send_packet, NX_WAIT_FOREVER);
-} /* send_http_get */
-
-static UINT receive_http_response(NX_TCP_SOCKET *socket, CHAR *receive_buffer, ULONG buffer_size)
-{
-	printf("receive_http_response entered...\r\n");
-    NX_PACKET *packet;
-    ULONG total_received = 0;
-    ULONG expected_body_length = 0;
-    ULONG actual_body_length = 0;
-    CHAR *body_start = NULL;
-
-    while (nx_tcp_socket_receive(socket, &packet, NX_IP_PERIODIC_RATE) == NX_SUCCESS)
-    {
-        if (extract_packet_to_buffer(packet, receive_buffer, &total_received, buffer_size) != NX_SUCCESS) {
-            nx_packet_release(packet);
-            break;
-        }
-
-        nx_packet_release(packet);
-
-        // Parse headers once
-        if (expected_body_length == 0 && (body_start = find_http_body_start(receive_buffer)) != NULL) {
-            expected_body_length = parse_content_length(receive_buffer);
-            actual_body_length = total_received - (ULONG)(body_start - receive_buffer);
-            if (expected_body_length)
-                printf("Content-Length = %lu bytes\r\n", expected_body_length);
-            else
-                printf("No Content-Length header found, reading until disconnect...\r\n");
-        } else if (expected_body_length > 0 && body_start != NULL) {
-            actual_body_length = total_received - (ULONG)(body_start - receive_buffer);
-        }
-
-        if (expected_body_length > 0 && actual_body_length >= expected_body_length)
-            break;
-    }
-
-    receive_buffer[total_received] = '\0';
-
-    body_start = find_http_body_start(receive_buffer);
-    if (body_start)
-        printf("HTTP Body:\r\n%s\r\n", body_start);
-    else
-        printf("HTTP Body not found. Full response:\r\n%s\r\n", receive_buffer);
-
-    return NX_SUCCESS;
-} /* receive_http_response */
-
-
-static UINT extract_packet_to_buffer(NX_PACKET *packet, CHAR *buffer, ULONG *offset, ULONG max_size)
-{
-	printf("extract_packet_to_buffer entered...\r\n");
-    ULONG bytes;
-    if (*offset >= max_size - 1)
-        return NX_SIZE_ERROR;
-
-    UINT status = nx_packet_data_extract_offset(packet, 0,
-                                                buffer + *offset,
-                                                max_size - *offset - 1,
-                                                &bytes);
-    if (status != NX_SUCCESS)
-        return status;
-
-    *offset += bytes;
-    buffer[*offset] = '\0';
-    return NX_SUCCESS;
-} /* extract_packet_to_buffer */
-
-static ULONG parse_content_length(const CHAR *headers)
-{
-	printf("parse_content_length entered...\r\n");
-    const CHAR *ptr = strstr(headers, "Content-Length:");
-    if (!ptr) return 0;
-
-    ptr += strlen("Content-Length:");
-    while (*ptr == ' ') ptr++;
-
-    return strtoul(ptr, NULL, 10);
-} /* parse_content_length */
-
-static CHAR *find_http_body_start(CHAR *buffer)
-{
-	printf("find_http_body_start entered...\r\n");
-    CHAR *pos = strstr(buffer, "\r\n\r\n");
-    return (pos) ? pos + 4 : NULL;
-} /* find_http_body_start */
 
 static void log_thread_priorities(void)
 {
@@ -1061,5 +976,139 @@ static void print_thread_states(void)
     tx_thread_info_get(&LedThread, NX_NULL, &thread_state, NX_NULL, NX_NULL, NX_NULL, NX_NULL, NX_NULL, NX_NULL);
     printf("LedThread state: 0x%02X\r\n", thread_state);
 } /* print_thread_states */
+
+
+#ifdef __HTTP_ONLY__
+static UINT create_http_client(void)
+{
+	printf("create_http_client entered...\r\n");
+    UINT status = nx_web_http_client_create(&HTTPClient, "HTTP Client", &NetXDuoEthIpInstance, &ClientPacketPool, NX_WAIT_FOREVER);
+    if (status != NX_SUCCESS) {
+        printf("HTTP client create failed: 0x%02X\r\n", status);
+        return status;
+    }
+    return NX_SUCCESS;
+} /* create_http_client */
+
+static VOID print_gateway_mac(void)
+{
+    ULONG gw_ip, msw, lsw;
+    if (nx_ip_gateway_address_get(&NetXDuoEthIpInstance, &gw_ip) == NX_SUCCESS &&
+        nx_arp_hardware_address_find(&NetXDuoEthIpInstance, gw_ip, &msw, &lsw) == NX_SUCCESS) {
+        printf("Gateway MAC: %08lX:%08lX\r\n", msw, lsw);
+    } else {
+        printf("Could not resolve gateway MAC.\r\n");
+    }
+} /* print_gateway_mac */
+
+static UINT send_http_get(NX_TCP_SOCKET *socket, CHAR *host_name, CHAR *resource_path)
+{
+	printf("send_http_get entered...\r\n");
+    NX_PACKET *send_packet;
+    char request[1024];
+
+    snprintf(request,
+    		sizeof(request),
+            "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: nxd_tcp_client/1.0.0\r\nAccept: */*\r\n\r\n",
+            resource_path,
+			host_name);
+
+    UINT status = nx_packet_allocate(NetXDuoEthIpInstance.nx_ip_default_packet_pool,
+                                     &send_packet, NX_TCP_PACKET, NX_WAIT_FOREVER);
+    if (status != NX_SUCCESS) return status;
+
+    status = nx_packet_data_append(send_packet, request, strlen(request),
+                                   NetXDuoEthIpInstance.nx_ip_default_packet_pool, NX_WAIT_FOREVER);
+    if (status != NX_SUCCESS) {
+        nx_packet_release(send_packet);
+        return status;
+    }
+
+    return nx_tcp_socket_send(socket, send_packet, NX_WAIT_FOREVER);
+} /* send_http_get */
+
+static UINT receive_http_response(NX_TCP_SOCKET *socket, CHAR *receive_buffer, ULONG buffer_size)
+{
+	printf("receive_http_response entered...\r\n");
+    NX_PACKET *packet;
+    ULONG total_received = 0;
+    ULONG expected_body_length = 0;
+    ULONG actual_body_length = 0;
+    CHAR *body_start = NULL;
+
+    while (nx_tcp_socket_receive(socket, &packet, NX_IP_PERIODIC_RATE) == NX_SUCCESS)
+    {
+        if (extract_packet_to_buffer(packet, receive_buffer, &total_received, buffer_size) != NX_SUCCESS) {
+            nx_packet_release(packet);
+            break;
+        }
+
+        nx_packet_release(packet);
+
+        // Parse headers once
+        if (expected_body_length == 0 && (body_start = find_http_body_start(receive_buffer)) != NULL) {
+            expected_body_length = parse_content_length(receive_buffer);
+            actual_body_length = total_received - (ULONG)(body_start - receive_buffer);
+            if (expected_body_length)
+                printf("Content-Length = %lu bytes\r\n", expected_body_length);
+            else
+                printf("No Content-Length header found, reading until disconnect...\r\n");
+        } else if (expected_body_length > 0 && body_start != NULL) {
+            actual_body_length = total_received - (ULONG)(body_start - receive_buffer);
+        }
+
+        if (expected_body_length > 0 && actual_body_length >= expected_body_length)
+            break;
+    }
+
+    receive_buffer[total_received] = '\0';
+
+    body_start = find_http_body_start(receive_buffer);
+    if (body_start)
+        printf("HTTP Body:\r\n%s\r\n", body_start);
+    else
+        printf("HTTP Body not found. Full response:\r\n%s\r\n", receive_buffer);
+
+    return NX_SUCCESS;
+} /* receive_http_response */
+
+static ULONG parse_content_length(const CHAR *headers)
+{
+	printf("parse_content_length entered...\r\n");
+    const CHAR *ptr = strstr(headers, "Content-Length:");
+    if (!ptr) return 0;
+
+    ptr += strlen("Content-Length:");
+    while (*ptr == ' ') ptr++;
+
+    return strtoul(ptr, NULL, 10);
+} /* parse_content_length */
+
+static CHAR *find_http_body_start(CHAR *buffer)
+{
+	printf("find_http_body_start entered...\r\n");
+    CHAR *pos = strstr(buffer, "\r\n\r\n");
+    return (pos) ? pos + 4 : NULL;
+} /* find_http_body_start */
+
+static UINT extract_packet_to_buffer(NX_PACKET *packet, CHAR *buffer, ULONG *offset, ULONG max_size)
+{
+	printf("extract_packet_to_buffer entered...\r\n");
+    ULONG bytes;
+    if (*offset >= max_size - 1)
+        return NX_SIZE_ERROR;
+
+    UINT status = nx_packet_data_extract_offset(packet, 0,
+                                                buffer + *offset,
+                                                max_size - *offset - 1,
+                                                &bytes);
+    if (status != NX_SUCCESS)
+        return status;
+
+    *offset += bytes;
+    buffer[*offset] = '\0';
+    return NX_SUCCESS;
+} /* extract_packet_to_buffer */
+#endif
 
 /* USER CODE END 1 */
