@@ -10,6 +10,8 @@
 
 /* Memory allocation and platform layer */
 #define MBEDTLS_PLATFORM_MEMORY
+#define MBEDTLS_NO_PLATFORM_ENTROPY
+
 //#define MBEDTLS_PLATFORM_NO_STD_FUNCTIONS
 //#define MBEDTLS_PLATFORM_EXIT_ALT
 //#define MBEDTLS_PLATFORM_PRINTF_ALT

@@ -5,7 +5,7 @@
 
 extern RNG_HandleTypeDef hrng;
 
-int mbedtls_hardware_entropy_poll(void *data,
+int mbedtls_platform_entropy_poll(void *data,
                                   unsigned char *output,
                                   size_t len,
                                   size_t *olen)
