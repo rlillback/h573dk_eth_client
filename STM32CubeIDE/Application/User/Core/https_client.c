@@ -1,36 +1,33 @@
-
 #include "https_client.h"
 #include "mbedtls/ssl.h"
-#include "mbedtls/ssl_internal.h"
 #include "mbedtls/platform.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/error.h"
+#include "nx_packet.h"
+#include "nx_api.h"
 
 #include <string.h>
 #include <stdio.h>
 
 extern NX_PACKET_POOL g_packet_pool;
 
-// NetX Duo to mbedTLS send wrapper
-static int net_send(void *ctx, const unsigned char *buf, size_t len)
-{
+static int net_send(void *ctx, const unsigned char *buf, size_t len) {
     NX_TCP_SOCKET *socket = (NX_TCP_SOCKET *)ctx;
     NX_PACKET *packet;
 
-    if (nx_packet_allocate(&g_packet_pool, &packet, NX_TCP_PACKET, NX_WAIT_FOREVER) != NX_SUCCESS)
+    if (nx_packet_allocate(&g_packet_pool, &packet, NX_TCP_PACKET, NX_WAIT_FOREVER) != NX_SUCCESS) {
         return -1;
+    }
 
-    if (nx_packet_data_append(packet, (void *)buf, len, &g_packet_pool, NX_WAIT_FOREVER) != NX_SUCCESS)
-    {
+    if (nx_packet_data_append(packet, (void *)buf, len, &g_packet_pool, NX_WAIT_FOREVER) != NX_SUCCESS) {
         nx_packet_release(packet);
         return -1;
     }
 
-    if (nx_tcp_socket_send(socket, packet, NX_WAIT_FOREVER) != NX_SUCCESS)
-    {
+    if (nx_tcp_socket_send(socket, packet, NX_WAIT_FOREVER) != NX_SUCCESS) {
         nx_packet_release(packet);
         return -1;
     }
@@ -59,7 +56,6 @@ int https_client_get(NX_TCP_SOCKET *socket, const char *host, const char *path) 
     mbedtls_ssl_config conf;
     mbedtls_ctr_drbg_context ctr_drbg;
     mbedtls_entropy_context entropy;
-    mbedtls_x509_crt cacert;
 
     const char *pers = "netx_https_client";
     char req_buffer[512];
@@ -69,19 +65,29 @@ int https_client_get(NX_TCP_SOCKET *socket, const char *host, const char *path) 
     mbedtls_ssl_config_init(&conf);
     mbedtls_ctr_drbg_init(&ctr_drbg);
     mbedtls_entropy_init(&entropy);
-    mbedtls_x509_crt_init(&cacert);
 
-    mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                          (const unsigned char *)pers, strlen(pers));
+    if ((ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                     (const unsigned char *)pers, strlen(pers))) != 0) {
+        printf("DRBG seed failed: -0x%x\n", -ret);
+        goto cleanup;
+    }
 
-    mbedtls_ssl_config_defaults(&conf,
-        MBEDTLS_SSL_IS_CLIENT,
-        MBEDTLS_SSL_TRANSPORT_STREAM,
-        MBEDTLS_SSL_PRESET_DEFAULT);
+    if ((ret = mbedtls_ssl_config_defaults(&conf,
+                                           MBEDTLS_SSL_IS_CLIENT,
+                                           MBEDTLS_SSL_TRANSPORT_STREAM,
+                                           MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
+        printf("Config defaults failed: -0x%x\n", -ret);
+        goto cleanup;
+    }
 
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
     mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
-    mbedtls_ssl_setup(&ssl, &conf);
+
+    if ((ret = mbedtls_ssl_setup(&ssl, &conf)) != 0) {
+        printf("SSL setup failed: -0x%x\n", -ret);
+        goto cleanup;
+    }
+
     mbedtls_ssl_set_bio(&ssl, socket, net_send, net_recv, NULL);
 
     if ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
@@ -90,7 +96,7 @@ int https_client_get(NX_TCP_SOCKET *socket, const char *host, const char *path) 
     }
 
     snprintf(req_buffer, sizeof(req_buffer),
-        "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
+             "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
 
     if ((ret = mbedtls_ssl_write(&ssl, (const unsigned char *)req_buffer, strlen(req_buffer))) < 0) {
         printf("SSL write failed: -0x%x\n", -ret);
@@ -101,7 +107,7 @@ int https_client_get(NX_TCP_SOCKET *socket, const char *host, const char *path) 
     do {
         ret = mbedtls_ssl_read(&ssl, resp_buf, sizeof(resp_buf) - 1);
         if (ret > 0) {
-            resp_buf[ret] = 0;
+            resp_buf[ret] = '\0';
             printf("%s", resp_buf);
         }
     } while (ret > 0);
@@ -111,7 +117,5 @@ cleanup:
     mbedtls_ssl_config_free(&conf);
     mbedtls_ctr_drbg_free(&ctr_drbg);
     mbedtls_entropy_free(&entropy);
-    mbedtls_x509_crt_free(&cacert);
-
     return ret;
 }
