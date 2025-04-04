@@ -73,7 +73,6 @@
 									<listOptionValue builtIn="false" value="../../Middlewares/ST/netxduo/addons/dns"/>
 									<listOptionValue builtIn="false" value="../../Middlewares/mbedtls/include"/>
 									<listOptionValue builtIn="false" value="../../Middlewares/mbedtls/library"/>
-									<listOptionValue builtIn="false" value="../../Middlewares/mbedtls/include/psa"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1989416274" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
 							</tool>
