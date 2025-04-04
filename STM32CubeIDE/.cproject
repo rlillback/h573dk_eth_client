@@ -102,7 +102,7 @@
 						</toolChain>
 					</folderInfo>
 					<sourceEntries>
-						<entry excluding="Middlewares/mbedtls/psa_crypto_aead.c|Middlewares/mbedtls/net_sockets.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+						<entry excluding="Middlewares/mbedtls/timing.c|Middlewares/mbedtls/entropy_poll.c|Middlewares/mbedtls/psa_crypto_aead.c|Middlewares/mbedtls/net_sockets.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>
@@ -202,7 +202,7 @@
 						</toolChain>
 					</folderInfo>
 					<sourceEntries>
-						<entry excluding="Middlewares/mbedtls/psa_crypto_aead.c|Middlewares/mbedtls/net_sockets.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+						<entry excluding="Middlewares/mbedtls/timing.c|Middlewares/mbedtls/entropy_poll.c|Middlewares/mbedtls/psa_crypto_aead.c|Middlewares/mbedtls/net_sockets.c" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>

@@ -66,6 +66,10 @@
 #define MBEDTLS_ERROR_C
 #define MBEDTLS_DEBUG_C
 
+/* Use entropy from the hardware TRNG */
+#define MBEDTLS_NO_PLATFORM_ENTROPY
+#define MBEDTLS_ENTROPY_HARDWARE_ALT
+
 #include "mbedtls/check_config.h"
 
 #endif /* MBEDTLS_CONFIG_H */
