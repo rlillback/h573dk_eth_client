@@ -622,6 +622,8 @@ int mbedtls_ssl_derive_keys( mbedtls_ssl_context *ssl )
     const mbedtls_cipher_info_t *cipher_info;
     const mbedtls_md_info_t *md_info;
 
+    (void)iv_copy_len;
+
     mbedtls_ssl_session *session = ssl->session_negotiate;
     mbedtls_ssl_transform *transform = ssl->transform_negotiate;
     mbedtls_ssl_handshake_params *handshake = ssl->handshake;

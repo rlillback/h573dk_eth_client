@@ -46,6 +46,7 @@ int iar_fputc(int ch);
 #define PUTCHAR_PROTOTYPE int fputc(int ch, FILE *f)
 #endif /* __ICCARM__ */
 
+#undef __SD_CARD__
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -74,7 +75,9 @@ UART_HandleTypeDef huart1;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ETH_Init(void);
+#if defined(__SD_CARD__)
 static void MX_SDMMC1_SD_Init(void);
+#endif
 static void MX_USART1_UART_Init(void);
 static void MX_ICACHE_Init(void);
 static void MX_RNG_Init(void);
@@ -117,7 +120,9 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ETH_Init();
+#if defined(__SD_CARD__)
   MX_SDMMC1_SD_Init();
+#endif
   MX_USART1_UART_Init();
   MX_ICACHE_Init();
   MX_RNG_Init();
@@ -296,6 +301,7 @@ static void MX_RNG_Init(void)
 
 }
 
+#if defined(__SD_CARD__)
 /**
   * @brief SDMMC1 Initialization Function
   * @param None
@@ -326,6 +332,7 @@ static void MX_SDMMC1_SD_Init(void)
   /* USER CODE END SDMMC1_Init 2 */
 
 }
+#endif
 
 /**
   * @brief USART1 Initialization Function
