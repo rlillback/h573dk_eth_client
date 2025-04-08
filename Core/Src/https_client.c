@@ -1,35 +1,33 @@
 #include "nx_api.h"
-#include "nx_api.h"       // <-- Needed for DNS, TLS, etc.
-#include "nxd_dns.h"       // <-- Specifically for DNS APIs
+#include "nxd_dns.h"
 #include "https_client.h"
-#include "mbedtls/platform.h"
-#include "mbedtls/net_sockets.h"
-#include "mbedtls/ssl.h"
-#include "mbedtls/ssl_internal.h"
-#include "mbedtls/error.h"
-#include "mbedtls/debug.h"
-#include "mbedtls/ctr_drbg.h"
-#include "mbedtls/entropy.h"
-#include "mbedtls/ssl.h"
-#include "tx_api.h"
 #include "main.h"
-#include "stm32_entropy.h"
-
+#include "root_pems.h"
 #include <stdio.h>
 #include <string.h>
+#include <tx_api.h>
 
-#define PRINT_IP_ADDRESS(addr) do { \
-                                    printf("%lu.%lu.%lu.%lu \r\n", \
-                                    (addr >> 24) & 0xff, \
-                                    (addr >> 16) & 0xff, \
-                                    (addr >> 8) & 0xff, \
-                                     addr& 0xff);\
-                                  }while(0)
+#include "tx_api.h"
+#include "nx_tcp.h"
+#include "app_netxduo.h"
+
+#include <wolfssl/wolfcrypt/error-crypt.h>
+#include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/logging.h>
+#include <wolfssl/wolfcrypt/integer.h>
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/version.h>
+
+#if !defined(WOLFSSL_DEBUG_LEVEL)
+	#define WOLFSSL_DEBUG_LEVEL 6
+#endif
 
 #define g_packet_pool      ClientPacketPool
 #define g_ip               NetXDuoEthIpInstance
 #define g_dns              DnsClient
-
 
 extern NX_PACKET_POOL g_packet_pool;
 extern NX_IP g_ip;
@@ -38,254 +36,618 @@ extern NX_DNS g_dns;
 #define HTTPS_TIMEOUT 3000
 #define MAX_REQUEST_LEN 512
 
-// Forward declarations
-static int net_send(void *ctx, const unsigned char *buf, size_t len);
-static int net_recv(void *ctx, unsigned char *buf, size_t len);
+#define TLS_MAX_RETRIES 200
+#define TLS_SLEEP_TICKS 5
 
-// Convert milliseconds to ThreadX ticks
-static ULONG ms_to_ticks(UINT ms) {
-    return (TX_TIMER_TICKS_PER_SECOND * ms + 999) / 1000;
-}
+// Optional debug toggles
+#undef  __MSS_PACKET_DUMP__
+#undef  __DUMP_WOLFSSL_PACKETS__
+#undef  __PRINT_ALLOCATIONS__
+#undef  __PRINT_WOLF_SSL_DEBUG__
+#undef  __PRINT_HTTPS_RESPONSES__
+#undef  __PRINT_NET_RECV_DATA__
+#undef  __DUMP_CLIENT_PACKET_POOL__
 
-// Set the intermediate and final delays (in milliseconds)
-static void threadx_set_timer(void *ctx, uint32_t int_ms, uint32_t fin_ms) {
-    mbedtls_threadx_timer_ctx *tctx = (mbedtls_threadx_timer_ctx *) ctx;
+// CA Certificate roots to load
+#undef  __LOAD_AMAZON_CA__
+#undef  __LOAD_DIGICERT_CA__
+#define __LOAD_ENTRUST_CA__
 
-    tctx->intermediate_delay = ms_to_ticks(int_ms);
-    tctx->final_delay = ms_to_ticks(fin_ms);
-    tctx->start_time = tx_time_get();
-    tctx->timer_active = 1;
-}
+int connect_with_retries(WOLFSSL* ssl);
+int read_with_retries(WOLFSSL* ssl, char* buffer, int len);
+int write_with_retries(WOLFSSL* ssl, const char* buffer, int len);
+void print_cert_subject_from_pem(const char* pem, const char* label);
+static void print_ciphers(void);
+static void tls_stream_reset(void);
 
-// Get timer state:
-//   -1: expired
-//    0: ongoing
-//    1: intermediate delay passed
-static int threadx_get_timer(void *ctx) {
-    mbedtls_threadx_timer_ctx *tctx = (mbedtls_threadx_timer_ctx *) ctx;
+static UCHAR tls_stream_buffer[MAX_TLS_RECORD_SIZE];
 
-    if (!tctx->timer_active)
-        return -1;
+static tls_stream_state_t tls_stream;
 
-    ULONG elapsed = tx_time_get() - tctx->start_time;
-
-    if (elapsed >= tctx->final_delay) {
-        tctx->timer_active = 0;
-        return -1; // expired
+static void* malloc_wrapper(size_t sz, void* heap, int type)
+{
+    void* p = malloc(sz);
+    if (!p) {
+		printf("XMALLOC failed! type=%d, size=%lu\r\n", type, (unsigned long)sz);
+		Error_Handler();
+	}
+#if defined(__PRINT_ALLOCATIONS__)
+    else {
+    	printf("XMALLOC(type=%d, size=%lu) = %p\r\n", type, (unsigned long)sz, p);
     }
-
-    if (elapsed >= tctx->intermediate_delay)
-        return 1; // intermediate delay passed
-
-    return 0; // ongoing
+#endif
+    return p;
 }
 
-// One-line helper to register callbacks
-void mbedtls_ssl_set_threadx_timer_cb(mbedtls_ssl_context *ssl) {
-    static mbedtls_threadx_timer_ctx timer_ctx;
-    mbedtls_ssl_set_timer_cb(ssl, &timer_ctx, threadx_set_timer, threadx_get_timer);
+static void free_wrapper(void* p, void* heap, int type)
+{
+#if defined(__PRINT_ALLOCATIONS__)
+    printf("XFREE(type=%d, ptr=%p)\r\n", type, p);
+#endif
+    free(p);
 }
 
-// TLS wrappers for NetX socket
-static int net_send(void *ctx, const unsigned char *buf, size_t len) {
-	printf("Entered net_send function...\r\n");
+static void* realloc_wrapper(void* p, size_t n, void* heap, int type)
+{
+    void* np = realloc(p, n);
+#if defined(__PRINT_ALLOCATIONS__)
+    printf("XREALLOC(type=%d, new_size=%lu) = %p\n", type, (unsigned long)n, np);
+#endif
+    return np;
+}
+
+void setup_allocators() {
+    wolfSSL_SetAllocators((wolfSSL_Malloc_cb)malloc_wrapper,
+    		              (wolfSSL_Free_cb)free_wrapper,
+						  (wolfSSL_Realloc_cb)realloc_wrapper);
+}
+
+int verify_cb(int preverify, WOLFSSL_X509_STORE_CTX* store) {
+    return preverify;
+} /* verify_cb */
+
+#if defined(__PRINT_WOLF_SSL_DEBUG__)
+void wolfssl_debug_cb(const int level, const char *const msg) {
+	if (level <= WOLFSSL_DEBUG_LEVEL) {
+		printf("[wolfSSL][%d] %s\r\n", level, msg);
+	}
+}
+#endif
+
+static int net_send(WOLFSSL *ssl, char *buf, int sz, void *ctx) {
+	printf("net_send function entered...\r\n");
     NX_TCP_SOCKET *socket = (NX_TCP_SOCKET *)ctx;
     NX_PACKET *packet;
     if (nx_packet_allocate(&g_packet_pool, &packet, NX_TCP_PACKET, NX_WAIT_FOREVER) != NX_SUCCESS)
-        return MBEDTLS_ERR_NET_SEND_FAILED;
+        return WOLFSSL_CBIO_ERR_GENERAL;
 
-    if (nx_packet_data_append(packet, (VOID *)buf, len, &g_packet_pool, NX_WAIT_FOREVER) != NX_SUCCESS)
-        return MBEDTLS_ERR_NET_SEND_FAILED;
+    if (nx_packet_data_append(packet, buf, sz, &g_packet_pool, NX_WAIT_FOREVER) != NX_SUCCESS)
+        return WOLFSSL_CBIO_ERR_GENERAL;
 
     if (nx_tcp_socket_send(socket, packet, NX_WAIT_FOREVER) != NX_SUCCESS)
-        return MBEDTLS_ERR_NET_SEND_FAILED;
+        return WOLFSSL_CBIO_ERR_GENERAL;
 
-    return (int)len;
+#if defined(__DUMP_CLIENT_PACKET_POOL__)
+    print_pool_state(&g_packet_pool, "[DEBUG] Client packet pool @ net_send");
+#endif
+    return sz;
 }
 
-static int net_recv(void *ctx, unsigned char *buf, size_t len) {
-	printf("Entered net_recv function...\r\n");
-    NX_TCP_SOCKET *socket = (NX_TCP_SOCKET *)ctx;
-    NX_PACKET *packet;
-    UINT status = nx_tcp_socket_receive(socket, &packet, HTTPS_TIMEOUT);
-
-    if (status != NX_SUCCESS)
-        return MBEDTLS_ERR_SSL_TIMEOUT;
-
-    ULONG bytes_copied;
-    status = nx_packet_data_extract_offset(packet, 0, buf, len, &bytes_copied);
-    nx_packet_release(packet);
-
-    if (status != NX_SUCCESS)
-        return MBEDTLS_ERR_NET_RECV_FAILED;
-
-    return (int)bytes_copied;
+void get_nx_packet(NX_TCP_SOCKET *socket, NX_PACKET **packet_ptr, UINT *status)
+{
+	int retries = 0;
+	do {
+		printf("calling nx_tcp_socket_receive(timeout=%u)...\r\n", HTTPS_TIMEOUT);
+		*status = nx_tcp_socket_receive(socket, packet_ptr, HTTPS_TIMEOUT);
+		printf("socket state = 0x%02X, status = 0x%X, packet ptr = 0x%p\r\n",
+			   socket->nx_tcp_socket_state, *status, *packet_ptr);
+		if (*packet_ptr) {
+			printf("this packet's length = %lu\r\n", (*packet_ptr)->nx_packet_length);
+		}
+		if (*status == NX_SUCCESS || retries >= 5) {
+			printf("nx_tcp_socket_receive returned code %u\r\n", *status);
+			break;
+		}
+		printf("net_recv: retrying receive (attempt %d)...\r\n", retries + 1);
+		tx_thread_sleep(5);
+	} while (++retries < 5);
 }
 
-UINT https_client_get(const char *host, const char *path, UINT port, CHAR *response_buf, UINT response_buf_size) {
-	printf("Entered https_client_get function...\r\n");
-    NX_TCP_SOCKET socket;
-    mbedtls_ssl_context ssl;
-    mbedtls_ssl_config conf;
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-    mbedtls_x509_crt ca_cert;
-    const char *pers = "nx_https_client";
+int net_recv(WOLFSSL *ssl, char *buf, int sz, void *ctx)
+{
+	NX_TCP_SOCKET *socket = (NX_TCP_SOCKET *)ctx;
+	tls_stream_state_t *stream = &tls_stream;
 
     UINT status;
+    NX_PACKET *packet = NULL;
+    ULONG copied = 0;
+    ULONG left_to_give = 0;
+
+#if defined(__DUMP_CLIENT_PACKET_POOL__)
+    print_pool_state(&g_packet_pool, "[DEBUG] Client packet pool @ net_send");
+#endif
+
+    if (stream->offset > stream->len) {
+    	printf("Error we have a stream offset larger than the length of the stream...\r\n");
+    	return WOLFSSL_CBIO_ERR_GENERAL;
+    } else {
+    	left_to_give = (stream->len - stream->offset);
+    }
+
+#if defined(__PRINT_NET_RECV_DATA__)
+    printf("net_recv function entered...\r\n");
+	printf("  ssl ptr = 0x%x\r\n", (UINT)ssl);
+	printf("  buf ptr = 0x%x\r\n", (UINT)&buf);
+	printf("  sz = %d\r\n", sz);
+	printf(" ctx ptr = 0x%x\r\n", (UINT)ctx);
+	printf(" stream->offset=%lu\r\n stream->len=%lu\r\n", stream->offset, stream->len);
+	printf(" bytes_still_left in buffer=%lu\r\n", left_to_give);
+#endif
+
+    // Do we have enough data to fufill wolfSSL's request?
+    // If so, give it to wolfSSL
+    if (left_to_give >= sz) {
+#if defined(__PRINT_NET_RECV_DATA__)
+    	printf("We don't need to retrieve any more data, so returning the next requested data\r\n");
+#endif
+		memcpy(buf, &stream->buffer[stream->offset], sz);
+
+#if defined(__DUMP_WOLFSSL_PACKETS__)
+		printf("➡️  net_recv returning %d bytes to wolfSSL without reading next packet:\r\n", sz);
+		for (ULONG i = 0; i < sz; i += 16) {
+			printf("  %04lX: ", i);
+			for (ULONG j = 0; j < 16 && (i + j) < sz; ++j) {
+				printf("%02X ", buf[i + j]);
+			}
+			printf("\r\n");
+		}
+#endif
+
+		stream->offset += sz; // Update the offset into our buffer
+#if defined(__RESET_STREAM_MID_EXCHANGE__)
+		if (stream->offset >= stream->len) {
+			printf("We need to reset our buffer, as we already served everything...\r\n");
+		    tls_stream_reset();
+		}
+#endif
+		return sz;
+    }
+
+    // If we get here, we need to read more data off of the wire
+	get_nx_packet(socket, &packet, &status);
+	// Extract packet data into the TLS buffer
+	copied = 0;
+	status = nx_packet_data_extract_offset(packet, // Pointer to the packet
+										   0,      // Offset in the packet from which we should copy
+										   &stream->buffer[stream->len], // The start of the buffer
+										   MAX_TLS_RECORD_SIZE - stream->len, // The length left in the buffer
+										   &copied); // Number of bytes that were copied into the buffer
+
+	if (status != NX_SUCCESS) {
+		printf("net_recv: receive error 0x%X\r\n", status);
+		return WOLFSSL_CBIO_ERR_WANT_READ;
+	}
+
+	if (packet &&
+		packet->nx_packet_length == 0 &&
+		socket->nx_tcp_socket_state == NX_TCP_CLOSE_WAIT) {
+		printf("net_recv: socket in CLOSE_WAIT — returning EOF to wolfSSL\r\n");
+		nx_packet_release(packet);
+		return 0;
+	}
+
+	if (copied == 0) {
+		printf("net_recv: data extract error or zero copy\r\n");
+		return WOLFSSL_CBIO_ERR_GENERAL;
+	}
+
+	printf("We copied %lu bytes from the wire\r\n", copied);
+#if defined(__MSS_PACKET_DUMP__)
+	printf("Dumping this MSS packet...\r\n");
+	for (ULONG i = 0; i < copied; i += 16) {
+		printf("  %04lX: ", i);
+		for (ULONG j = 0; j < 16 && (i + j) < copied; ++j) {
+			printf("%02X ", stream->buffer[stream->offset + i + j]);
+		}
+		printf("\r\n");
+	}
+#endif
+	stream->len += copied; // Expand the end of our buffer
+	nx_packet_release(packet);
+	packet = NULL;
+    return 0; // Tell wolfSSL to try the read again to see if we have enough data to serve
+}
+
+
+UINT https_client_get(const char *host, const char *path, UINT port, CHAR *response_buf, UINT response_buf_size) {
+    NX_TCP_SOCKET socket;
+    WOLFSSL_CTX *ctx = NULL;
+    WOLFSSL *ssl = NULL;
+    int ret;
     CHAR request[MAX_REQUEST_LEN];
-    int retval;
+    int error_occurred = 0;
+    ULONG t0, t1;
 
-    // Create NetX TCP socket
-    printf("Creating socket via nx_tcp_socket_create...\r\n");
-    status = nx_tcp_socket_create(&g_ip, &socket, "https_client_socket",
-                                  NX_IP_NORMAL, NX_FRAGMENT_OKAY, NX_IP_TIME_TO_LIVE, 8192,
-                                  NX_NULL, NX_NULL);
-    if (status != NX_SUCCESS) {
-    	printf("Socket creation failed with error code 0x%02X\r\n",status);
-    	Error_Handler();
+    const char* version = wolfSSL_lib_version();
+    printf("wolfSSL version: %s\r\n", version);
+
+	printf("Listing available wolfssl ciphers...\r\n");
+	print_ciphers(); // Optional: Print enabled ciphers
+
+    printf("Setting allocator hooks to watch memory...\r\n");
+    setup_allocators();
+
+    t0 = tx_time_get();
+    printf("Calling wolfSSL_Init...\r\n");
+    wolfSSL_Init();
+    t1 = tx_time_get();
+    printf("wolfSSL_Init done in %lu ticks\r\n", t1 - t0);
+
+#if defined(__PRINT_WOLF_SSL_DEBUG__)
+    printf("Calling wolfSSL_Debugging_ON...\r\n");
+    wolfSSL_Debugging_ON();
+    printf("Setting wolfSSL_SetLoggingCb...\r\n");
+    wolfSSL_SetLoggingCb(wolfssl_debug_cb);
+#endif
+
+    printf("Setting wolfSSL verify callback function...\r\n");
+    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_cb);
+
+    t0 = tx_time_get();
+    printf("Calling wolfSSL_CTX_new...\r\n");
+    if ((ctx = wolfSSL_CTX_new(wolfTLSv1_2_client_method())) == NULL) {
+        printf("wolfSSL_CTX_new error\r\n");
+        error_occurred = 1;
+        goto cleanup;
     }
-    printf("Socket creation successful...\r\nAttempting to bind socket to port...\r\n");
+    t1 = tx_time_get();
+    printf("wolfSSL_CTX_new successful in %lu ticks\r\n", t1 - t0);
 
-    status = nx_tcp_client_socket_bind(&socket, NX_ANY_PORT, NX_WAIT_FOREVER);
-    if (status != NX_SUCCESS) {
-    	printf("Socket bind failed with error code 0x%02X\r\n", status);
-    	Error_Handler();
+#if !defined(__LOAD_AMAZON_CA__) && !defined(__LOAD_DIGICERT_CA__) && !defined(__LOAD_ENTRUST_CA__)
+	#error "At least once root CA must be loaded"
+#endif
+
+#if defined(__LOAD_AMAZON_CA__)
+    print_cert_subject_from_pem(amazon_root_ca1_pem, "Loading Root CA");
+    t0 = tx_time_get();
+    printf("Calling wolfSSL_CTX_load_verify_buffer...\r\n");
+    if (wolfSSL_CTX_load_verify_buffer(ctx, (const unsigned char *)amazon_root_ca1_pem,
+                                       strlen(amazon_root_ca1_pem), WOLFSSL_FILETYPE_PEM) != SSL_SUCCESS) {
+        printf("wolfSSL_CTX_load_verify_buffer error\r\n");
+        error_occurred = 1;
+        goto cleanup;
     }
-    printf("Socket bind successful...\r\n");
+    t1 = tx_time_get();
+    printf("wolfSSL_CTX_load_verify_buffer successful in %lu ticks\r\n", t1 - t0);
+#endif
 
-    ULONG ip_address;
-    printf("Looking up hostname %s IP address using DNS...\r\n", host);
-    status = nx_dns_host_by_name_get(&g_dns, (UCHAR *)host, &ip_address, NX_WAIT_FOREVER);
-    if (status != 0) {
-    	printf("nx_dns_host_by_name_get failed with code 0x%02X\r\n", status);
-    	Error_Handler();
-    }
-    printf("Hostname %s returned and IP Address of\r\n", host);
-    PRINT_IP_ADDRESS(ip_address);
-
-    printf("Connecting to socket using port %u...\r\n", port);
-    status = nx_tcp_client_socket_connect(&socket, ip_address, port, NX_WAIT_FOREVER);
-    if (status != 0) {
-      	printf("nx_tcp_client_socket_connect failed with code 0x%02X\r\n", status);
-       	Error_Handler();
-    }
-
-    // TLS setup
-    mbedtls_ssl_init(&ssl);
-    mbedtls_ssl_config_init(&conf);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    mbedtls_entropy_init(&entropy);
-    // ✅ Register your entropy source here
-	retval = mbedtls_entropy_add_source(&entropy,
-									 mbedtls_hardware_poll,
-									 NULL,
-									 32, // Minimum bytes of entropy (usually 32)
-									 MBEDTLS_ENTROPY_SOURCE_STRONG);
-	if (retval != 0) {
-		printf("mbedtls_entropy_add_source failed: -0x%X\r\n", -retval);
+#if defined(__LOAD_DIGICERT_CA__)
+    print_cert_subject_from_pem(digicert_global_root_c3_pem, "Loading Root CA");
+    t0 = tx_time_get();
+	printf("Calling wolfSSL_CTX_load_verify_buffer...\r\n");
+	if (wolfSSL_CTX_load_verify_buffer(ctx, (const unsigned char *)digicert_global_root_c3_pem,
+									   strlen(digicert_global_root_c3_pem), WOLFSSL_FILETYPE_PEM) != SSL_SUCCESS) {
+		printf("wolfSSL_CTX_load_verify_buffer error\r\n");
+		error_occurred = 1;
 		goto cleanup;
 	}
-	printf("mbedtls_entropy_add_source successful...\r\n");
-    mbedtls_x509_crt_init(&ca_cert);
+	t1 = tx_time_get();
+	printf("wolfSSL_CTX_load_verify_buffer successful in %lu ticks\r\n", t1 - t0);
+#endif
 
-    printf("Seeding DRBG via mbedtls_ctr_drbg_seed...\r\n");
-    retval = mbedtls_ctr_drbg_seed(&ctr_drbg,
-                                mbedtls_entropy_func,
-                                &entropy,
-                                (const unsigned char *)pers,
-                                strlen(pers));
-    if (retval != 0) {
-        printf("DRBG seed failed: -0x%X\r\n", -retval);
+#if defined(__LOAD_ENTRUST_CA__)
+	print_cert_subject_from_pem(lets_encrypt_root_r11, "Loading Root CA");
+	t0 = tx_time_get();
+	printf("Calling wolfSSL_CTX_load_verify_buffer...\r\n");
+	if (wolfSSL_CTX_load_verify_buffer(ctx, (const unsigned char *)lets_encrypt_root_r11,
+									   strlen(lets_encrypt_root_r11), WOLFSSL_FILETYPE_PEM) != SSL_SUCCESS) {
+		printf("wolfSSL_CTX_load_verify_buffer error\r\n");
+		error_occurred = 1;
+		goto cleanup;
+	}
+	t1 = tx_time_get();
+	printf("wolfSSL_CTX_load_verify_buffer successful in %lu ticks\r\n", t1 - t0);
+#endif
+
+    printf("Setting verify mode with wolfSSL_CTX_set_verify...\r\n");
+    wolfSSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+
+    t0 = tx_time_get();
+    printf("Calling wolfSSL_new...\r\n");
+    if ((ssl = wolfSSL_new(ctx)) == NULL) {
+        printf("wolfSSL_new error\r\n");
+        error_occurred = 1;
+        goto cleanup;
+    }
+    t1 = tx_time_get();
+    printf("wolfSSL_new successful in %lu ticks\r\n", t1 - t0);
+
+    t0 = tx_time_get();
+    printf("Creating TCP socket...\r\n");
+    if (nx_tcp_socket_create(&g_ip, &socket, "https_client_socket",
+                             NX_IP_NORMAL, NX_FRAGMENT_OKAY, NX_IP_TIME_TO_LIVE, 8192,
+                             NX_NULL, NX_NULL) != NX_SUCCESS) {
+        printf("Socket create failed\r\n");
+        error_occurred = 1;
+        goto cleanup;
+    }
+    t1 = tx_time_get();
+    printf("TCP socket created in %lu ticks\r\n", t1 - t0);
+
+    t0 = tx_time_get();
+    printf("Binding socket...\r\n");
+    if (nx_tcp_client_socket_bind(&socket, NX_ANY_PORT, NX_WAIT_FOREVER) != NX_SUCCESS) {
+        printf("Socket bind failed\r\n");
+        error_occurred = 1;
+        goto cleanup;
+    }
+    t1 = tx_time_get();
+    printf("Socket bound in %lu ticks\r\n", t1 - t0);
+
+    ULONG ip_address;
+    t0 = tx_time_get();
+    printf("Performing DNS lookup...\r\n");
+    if (nx_dns_host_by_name_get(&g_dns, (UCHAR *)host, &ip_address, NX_WAIT_FOREVER) != NX_SUCCESS) {
+        printf("DNS lookup failed\r\n");
+        error_occurred = 1;
+        goto cleanup;
+    }
+    t1 = tx_time_get();
+    printf("DNS lookup successful in %lu ticks\r\n", t1 - t0);
+
+    PRINT_IP_ADDRESS(ip_address);
+
+    t0 = tx_time_get();
+    printf("Connecting socket...\r\n");
+    if (nx_tcp_client_socket_connect(&socket, ip_address, port, NX_WAIT_FOREVER) != NX_SUCCESS) {
+        printf("Socket connect failed\r\n");
+        error_occurred = 1;
+        goto cleanup;
+    }
+    t1 = tx_time_get();
+    printf("Socket connected in %lu ticks\r\n", t1 - t0);
+
+    printf("Resetting TLS stream state...\r\n");
+    tls_stream_reset();
+
+    printf("Setting wolfSSL IO callbacks...\r\n");
+    wolfSSL_SSLSetIORecv(ssl, net_recv);
+    wolfSSL_SSLSetIOSend(ssl, net_send);
+    wolfSSL_SetIOReadCtx(ssl, &socket);
+    wolfSSL_SetIOWriteCtx(ssl, &socket);
+    printf("wolfSSL IO callbacks set successfully...\r\n");
+
+    printf("Setting SNI using wolfSSL_UseSNI...\r\n");
+    ret = wolfSSL_UseSNI(ssl, WOLFSSL_SNI_HOST_NAME, host, strlen(host));
+    if (ret != WOLFSSL_SUCCESS) {
+		printf("❌ wolfSSL_UseSNI failed: %d\r\n", ret);
+		Error_Handler();
+	}
+	printf("wolfSSL_UseSNI success...\r\n");
+
+    printf("Setting ALPN using wolfSSL_UseALPN...\r\n");
+    const unsigned char alpn[] = {
+        0x08, 'h','t','t','p','/','1','.','1'
+    };
+    ret = wolfSSL_UseALPN(ssl, (char*)alpn, sizeof(alpn), WOLFSSL_ALPN_CONTINUE_ON_MISMATCH);
+    if (ret != WOLFSSL_SUCCESS) {
+        printf("❌ wolfSSL_UseALPN failed: %d\r\n", ret);
         Error_Handler();
     }
-    printf("DRBG seed successful....\r\n");
+    printf("wolfSSL_UseALPN success...\r\n");
 
-    retval = mbedtls_ssl_config_defaults(&conf,
-                                      MBEDTLS_SSL_IS_CLIENT,
-                                      MBEDTLS_SSL_TRANSPORT_STREAM,
-                                      MBEDTLS_SSL_PRESET_DEFAULT);
-    if (retval != 0) {
-        printf("mbedtls_ssl_config_defaults failed: -0x%X\r\n", -retval);
-        Error_Handler();
+    ULONG socket_state = 0;
+    UINT status = nx_tcp_socket_info_get(
+        &socket,
+        NULL, NULL,  // packets sent, bytes sent
+        NULL, NULL,  // packets received, bytes received
+        NULL, NULL,  // retransmit packets, packets queued
+        NULL,        // checksum errors
+        &socket_state,
+        NULL, NULL, NULL  // transmit queue, tx win, rx win
+    );
+
+    if (status == NX_SUCCESS) {
+        printf("🔍 Socket state: 0x%02lX (%s)\r\n", socket_state,
+               socket_state == NX_TCP_ESTABLISHED ? "ESTABLISHED" : "NOT ESTABLISHED");
+    } else {
+        printf("❌ Failed to get socket info, status: 0x%X\r\n", status);
     }
-    printf("mbedtls_ssl_config_defaults successful...\r\n");
 
-    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
-    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+    t0 = tx_time_get();
+    printf("Performing TLS handshake...\r\n");
 
-    retval = mbedtls_ssl_setup(&ssl, &conf);
-    if (retval != 0) {
-        printf("ssl_setup failed: -0x%X\r\n", -retval);
-        Error_Handler();
+    if ((ret = connect_with_retries(ssl)) != SSL_SUCCESS) {
+        char err[80];
+        wolfSSL_ERR_error_string(wolfSSL_get_error(ssl, ret), err);
+        printf("TLS handshake failed: %s\r\n", err);
+        error_occurred = 1;
+        goto cleanup;
     }
-    printf("mbedtls_ssl_config_defaults successful...\r\n");
+    t1 = tx_time_get();
+    printf("TLS handshake successful in %lu ticks\r\n", t1 - t0);
 
-    printf("Registering callback via mbedtls_ssl_set_threadx_timer_cb...\r\n");
-    mbedtls_ssl_set_threadx_timer_cb(&ssl);
+    const char* cipher = wolfSSL_get_cipher_name(ssl);
+    if (cipher)
+        printf("Negotiated cipher: %s\r\n", cipher);
 
-    mbedtls_ssl_set_bio(&ssl, &socket, net_send, net_recv, NULL);
-    printf("mbedtls_ssl_set_bio finished...\r\n");
-
-    // ✅ Check that socket is connected
-    if (socket.nx_tcp_socket_state != NX_TCP_ESTABLISHED) {
-        printf("Socket is not connected (state = 0x%x)\r\n", socket.nx_tcp_socket_state);
-        Error_Handler();
-    }
-    printf("Socked is connected...\r\n");
-
-    // TLS handshake
-    retval = mbedtls_ssl_handshake(&ssl);
-    if (retval != 0) {
-    	printf("Failed mbedtls_ssl_handshake with code  -0x%X\r\n", -retval);
-    	mbedtls_ssl_free(&ssl);
-    	mbedtls_ssl_config_free(&conf);
-    	mbedtls_ctr_drbg_free(&ctr_drbg);
-    	mbedtls_entropy_free(&entropy);
-    	mbedtls_x509_crt_free(&ca_cert);
-
-    	nx_tcp_socket_disconnect(&socket, NX_WAIT_FOREVER);
-    	nx_tcp_client_socket_unbind(&socket);
-    	nx_tcp_socket_delete(&socket);
-    	Error_Handler();
-    }
-    printf("mbedtls_ssl_handshake successful...\r\n");
-
-    // HTTP GET request
+    printf("Preparing HTTP GET request...\r\n");
     snprintf(request, sizeof(request),
              "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\nAccept:application/json\r\n\r\n",
              path, host);
+    printf("HTTP GET request prepared...\r\n");
 
-    retval = mbedtls_ssl_write(&ssl, (const unsigned char *)request, strlen(request));
-    if (retval <= 0) {
-        printf("mbedtls_ssl_write failed: -0x%X\r\n", -retval);
-        Error_Handler();
+    t0 = tx_time_get();
+    printf("Sending HTTPS request...of:\r\n\r\n%s",request);
+    if ((ret = write_with_retries(ssl, request, strlen(request))) <= 0) {
+        printf("TLS write failed\r\n");
+        error_occurred = 1;
+        goto cleanup;
     }
-    printf("mbedtls_ssl_write successful...\r\n");
+    t1 = tx_time_get();
+    printf("HTTPS request sent in %lu ticks\r\n", t1 - t0);
 
-    printf("Got a good mbedtls_ssl_write using this request:\r\n%s", request);
-
-    int total = 0, ret;
-    while (1) {
-    	ret = mbedtls_ssl_read(&ssl,
-    			              (unsigned char *)response_buf + total,
-							  response_buf_size - total - 1);
-    	if (ret <= 0) break;
+    int total = 0;
+    printf("Reading HTTPS response...\r\n");
+    t0 = tx_time_get();
+    while (total < (int)(response_buf_size - 1)) {
+        ret = read_with_retries(ssl, response_buf + total, response_buf_size - 1 - total);
+        if (ret <= 0) break;
         total += ret;
     }
+    t1 = tx_time_get();
+    printf("HTTPS response read in %lu ticks\r\n", t1 - t0);
+
     response_buf[total] = '\0';
-    printf("response_buf =\r\n%s", response_buf);
+#if defined(__PRINT_HTTPS_RESPONSES__)
+    printf("HTTPS response received:\r\n\r\n%s\r\n\r\n", response_buf);
+#endif
 
 cleanup:
-    mbedtls_ssl_free(&ssl);
-    mbedtls_ssl_config_free(&conf);
-    mbedtls_ctr_drbg_free(&ctr_drbg);
-    mbedtls_entropy_free(&entropy);
-    mbedtls_x509_crt_free(&ca_cert);
-
+    if (ssl) wolfSSL_free(ssl);
+    if (ctx) wolfSSL_CTX_free(ctx);
+    wolfSSL_Cleanup();
     nx_tcp_socket_disconnect(&socket, NX_WAIT_FOREVER);
     nx_tcp_client_socket_unbind(&socket);
     nx_tcp_socket_delete(&socket);
 
-    return NX_SUCCESS;
-} /* https_client_get */
+    if (error_occurred) {
+        Error_Handler();
+    }
+
+    return error_occurred ? NX_NOT_SUCCESSFUL : NX_SUCCESS;
+}
+
+int connect_with_retries(WOLFSSL* ssl)
+{
+	printf("Entered connect_with_retries...\r\n");
+    int err, retries = 0;
+    int ret = WOLFSSL_SUCCESS;
+    do {
+    	print_pool_state(&ClientPacketPool, "Before wolfSSL_connect");
+        ret = wolfSSL_connect(ssl);
+        print_pool_state(&ClientPacketPool, "After wolfSSL_connect");
+        if (ret == WOLFSSL_SUCCESS) {
+        	printf("connect_with_retries finished good...\r\n");
+        	return WOLFSSL_SUCCESS;
+        }
+
+        err = wolfSSL_get_error(ssl, ret);
+        if (err == WOLFSSL_CBIO_ERR_WANT_READ || err == WOLFSSL_CBIO_ERR_WANT_WRITE) {
+        	printf("connect_with_retries sleeping for %d ticks\r\n", TLS_SLEEP_TICKS);
+            tx_thread_sleep(TLS_SLEEP_TICKS);
+            retries++;
+            continue;
+        }
+
+        printf("wolfSSL_connect failed: %s\r\n", wolfSSL_ERR_reason_error_string(err));
+        return ret;
+    } while (retries < TLS_MAX_RETRIES);
+
+    printf("wolfSSL_connect timed out after %d retries\r\n", retries);
+    return -1;
+}
+
+int read_with_retries(WOLFSSL* ssl, char* buffer, int len)
+{
+	printf("Entered read_with_retries...\r\n");
+	int err, retries = 0;
+	int ret = WOLFSSL_SUCCESS;
+    do {
+    	printf("Executing wolfSSL_read...\r\n");
+        ret = wolfSSL_read(ssl, buffer, len);
+        printf("wolfSSL_read returned code %d\r\n", ret);
+        if (ret > 0) {
+        	printf("read_with_retries finished good...\r\n");
+        	return ret;
+        }
+
+        err = wolfSSL_get_error(ssl, ret);
+        if (err == WOLFSSL_CBIO_ERR_WANT_READ || err == WOLFSSL_CBIO_ERR_WANT_WRITE) {
+        	printf("read_with_retries sleeping for %d ticks\r\n", TLS_SLEEP_TICKS);
+            tx_thread_sleep(TLS_SLEEP_TICKS);
+            retries++;
+            continue;
+        }
+
+        printf("wolfSSL_read failed: %s\r\n", wolfSSL_ERR_reason_error_string(err));
+        return ret;
+    } while (retries < TLS_MAX_RETRIES);
+
+    printf("wolfSSL_read timed out after %d retries\r\n", retries);
+    return -1;
+}
+
+int write_with_retries(WOLFSSL* ssl, const char* buffer, int len)
+{
+	printf("Entered write_with_retries...\r\n");
+	int err, retries = 0;
+	int ret = WOLFSSL_SUCCESS;
+    do {
+        ret = wolfSSL_write(ssl, buffer, len);
+        if (ret > 0) {
+        	printf("write_with_retries finished good...\r\n");
+        	return ret;
+        }
+
+        err = wolfSSL_get_error(ssl, ret);
+        if (err == WOLFSSL_CBIO_ERR_WANT_READ || err == WOLFSSL_CBIO_ERR_WANT_WRITE) {
+        	printf("write_with_retries sleeping for %d ticks\r\n", TLS_SLEEP_TICKS);
+            tx_thread_sleep(TLS_SLEEP_TICKS);
+            retries++;
+            continue;
+        }
+
+        printf("wolfSSL_write failed: %s\r\n", wolfSSL_ERR_reason_error_string(err));
+        return ret;
+    } while (retries < TLS_MAX_RETRIES);
+
+    printf("wolfSSL_write timed out after %d retries\r\n", retries);
+    return -1;
+}
+
+void print_cert_subject_from_pem(const char* pem, const char* label)
+{
+    if (pem == NULL) {
+        printf("❌ %s: PEM buffer is NULL\r\n", label);
+        return;
+    }
+
+    WOLFSSL_X509* cert = wolfSSL_X509_load_certificate_buffer(
+        (const unsigned char*)pem,
+        strlen(pem),
+        WOLFSSL_FILETYPE_PEM
+    );
+
+    if (cert != NULL) {
+        WOLFSSL_X509_NAME* subject_name = wolfSSL_X509_get_subject_name(cert);
+        char subject_str[256] = {0};
+
+        if (wolfSSL_X509_NAME_oneline(subject_name, subject_str, sizeof(subject_str)) != NULL) {
+            printf("%s: Subject = %s\r\n", label, subject_str);
+        } else {
+            printf("%s: Failed to convert subject name to string\r\n", label);
+        }
+
+        wolfSSL_X509_free(cert);
+    } else {
+        printf("%s: Failed to parse certificate buffer\r\n", label);
+    }
+}
+
+static void print_ciphers(void)
+{
+	char cipherList[2048];
+	int len = wolfSSL_get_ciphers(cipherList, sizeof(cipherList));
+	if (len > 0) {
+	    printf("Supported cipher list:\r\n%s\r\n", cipherList);
+	} else {
+	    printf("Failed to get cipher list\r\n");
+	}
+}
+
+static void tls_stream_reset(void) {
+	tls_stream.buffer = tls_stream_buffer;
+    tls_stream.len = 0;
+    tls_stream.offset = 0;
+}

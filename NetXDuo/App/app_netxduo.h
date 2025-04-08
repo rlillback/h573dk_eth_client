@@ -69,7 +69,7 @@ extern "C" {
 UINT MX_NetXDuo_Init(VOID *memory_ptr);
 
 /* USER CODE BEGIN EFP */
-
+void print_pool_state(NX_PACKET_POOL *pool, const char *label);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

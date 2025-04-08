@@ -44,8 +44,7 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 /* Memories definition */
 MEMORY
 {
-  RAM       (xrw)  : ORIGIN = 0x20000000, LENGTH = 608K
-  POOL_AREA (xrw)  : ORIGIN = 0x20078000 , LENGTH = 32K
+  RAM       (xrw)  : ORIGIN = 0x20000000, LENGTH = 640K
   FLASH     (rx)   : ORIGIN = 0x08000000, LENGTH = 2048K
 }
 
@@ -170,7 +169,7 @@ SECTIONS
     {
       . = ALIGN(8);
       __heap_start__ = .;
-      . = . + 0x10000;  /* 64 KB heap */
+      . = . + 0x18000;  /* 96 KB heap */
       __heap_end__ = .;
     } >RAM
 
@@ -179,15 +178,9 @@ SECTIONS
     {
       . = ALIGN(8);
       __stack_start__ = .;
-      . = . + 0x2000;   /* 8 KB stack */
+      . = . + 0x18000; /* 96 KB stack */
       __stack_end__ = .;
     } >RAM
-
-  .client_packet_pool_area :
-    {
-      . = ALIGN(32);
-      KEEP(*(.client_packet_pool_area))
-    } >POOL_AREA
 
   /* Remove information from the compiler libraries */
   /DISCARD/ :

@@ -63,8 +63,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* Ensure proper 4-byte alignment and fixed size */
-/* THESE MUST BE DECLARED FIRST BEFORE ANY DYNAMIC VARIABLE */
-__attribute__((section(".client_packet_pool_area"), used)) ALIGN_32BYTES(UCHAR client_packet_pool_area[CLIENT_POOL_SIZE]);
+ALIGN_32BYTES(UCHAR client_packet_pool_area[CLIENT_POOL_SIZE]);
 
 ALIGN_32BYTES(static UCHAR dns_packet_pool_area[DNS_POOL_SIZE]);
 /* Buffer for FileX FX_MEDIA sector cache. this should be 32-Bytes aligned to avoid
@@ -374,8 +373,18 @@ static VOID nx_client_thread_entry(ULONG thread_input)
     printf("Entered nx_client_thread_entry...\r\n");
 
     ULONG ip;
+#undef __USE_HTTPBIN__
+#define __USE_ONE_WAY_TLS__
+#if defined(__USE_HTTPBIN__)
     CHAR *host = "httpbin.org";
     CHAR *path = "/get";
+#elif defined(__USE_ONE_WAY_TLS__)
+    CHAR *host = "one-way-tls.keyfactoriot.com";
+    CHAR *path = "/";
+#else
+    CHAR *host = "iot-proxy.keyfactoriot.com";
+    CHAR *path = "/mtls-connect";
+#endif
     CHAR response[2048];
 
     if (resolve_hostname(host, &ip) != NX_SUCCESS) {
@@ -388,7 +397,7 @@ static VOID nx_client_thread_entry(ULONG thread_input)
         printf("HTTPS GET request failed.\r\n");
         Error_Handler();
     } else {
-        printf("HTTPS GET succeeded. Response:\r\n%s\r\n", response);
+        printf("HTTPS GET succeeded. Response:\r\n\r\n%s\r\n\r\n", response);
     }
 
     printf("HTTPS GET completed successfully.\r\n");
