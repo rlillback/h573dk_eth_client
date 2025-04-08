@@ -3622,6 +3622,11 @@ int mbedtls_ssl_prepare_handshake_record( mbedtls_ssl_context *ssl )
         return( MBEDTLS_ERR_SSL_INVALID_RECORD );
     }
 
+    /* ################### DEBUG RAL ######################## */
+    MBEDTLS_SSL_DEBUG_MSG( 1, ( "Dumping raw handshake message before parsing:" ) );
+    MBEDTLS_SSL_DEBUG_BUF( 1, "ssl->in_msg", ssl->in_msg, ssl->in_msglen );
+    /* ################### END DEBUG ######################## */
+
     ssl->in_hslen = mbedtls_ssl_hs_hdr_len( ssl ) + ssl_get_hs_total_len( ssl );
 
     MBEDTLS_SSL_DEBUG_MSG( 3, ( "handshake message: msglen ="
