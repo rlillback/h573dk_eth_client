@@ -25,9 +25,25 @@
 #include <stdint.h>
 
 /**
+* ### RAL Customize the heap to use my .heap defined area in the .ld scripts
+*/
+#undef  __USE_DEFAULT_HEAP__
+
+#if !defined(__USE_DEFAULT_HEAP__)
+// Defined in linker script (.ld files)
+extern uint8_t __heap_start__;
+extern uint8_t __heap_end__;
+#endif
+
+/**
  * Pointer to the current high watermark of the heap usage
  */
+#if !defined(__USE_DEFAULT_HEAP__)
+// Defined in linker script (.ld files)
+static uint8_t* heap_ptr = NULL;
+#else
 static uint8_t *__sbrk_heap_end = NULL;
+#endif
 
 /**
  * @brief _sbrk() allocates memory to the newlib heap and is used by malloc
@@ -52,6 +68,7 @@ static uint8_t *__sbrk_heap_end = NULL;
  */
 void *_sbrk(ptrdiff_t incr)
 {
+#ifdef __USE_DEFAULT_HEAP__
   extern uint8_t _end; /* Symbol defined in the linker script */
   extern uint8_t _estack; /* Symbol defined in the linker script */
   extern uint32_t _Min_Stack_Size; /* Symbol defined in the linker script */
@@ -76,4 +93,23 @@ void *_sbrk(ptrdiff_t incr)
   __sbrk_heap_end += incr;
 
   return (void *)prev_heap_end;
+#else
+  /* Use custom Heap settings */
+  uint8_t* prev_heap_ptr;
+
+  if (NULL == heap_ptr) {
+    heap_ptr = &__heap_start__;
+  }
+
+  prev_heap_ptr = heap_ptr;
+
+  if (heap_ptr + incr > &__heap_end__)
+  {
+    errno = ENOMEM;
+    return (void*)-1;
+  }
+
+  heap_ptr += incr;
+  return (void*)prev_heap_ptr;
+#endif
 }

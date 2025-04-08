@@ -53,7 +53,7 @@
 /* USER CODE BEGIN PD */
 #define NX_DHCP_OPTION_ROUTER 3
 // Define this if you only want to use HTTP and not HTTPS
-#define __HTTP_ONLY__
+#undef __HTTP_ONLY__
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/

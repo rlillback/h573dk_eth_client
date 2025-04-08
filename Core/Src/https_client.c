@@ -274,7 +274,7 @@ UINT https_client_get(const char *host, const char *path, UINT port, CHAR *respo
         total += ret;
     }
     response_buf[total] = '\0';
-    snprintf("response_buf =\r\n%s", total, response_buf);
+    printf("response_buf =\r\n%s", response_buf);
 
 cleanup:
     mbedtls_ssl_free(&ssl);
@@ -288,4 +288,4 @@ cleanup:
     nx_tcp_socket_delete(&socket);
 
     return NX_SUCCESS;
-} /* https_client_get - HELLO? */
+} /* https_client_get */

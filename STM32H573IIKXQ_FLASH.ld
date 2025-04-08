@@ -164,22 +164,30 @@ SECTIONS
     _ebss = .;         /* define a global symbol at bss end */
     __bss_end__ = _ebss;
   } >RAM
-  .client_packet_pool_area :
-  {
-    . = ALIGN(32);
-    KEEP(*(.client_packet_pool_area))
-  } >POOL_AREA
 
-  /* User_heap_stack section, used to check that there is enough "RAM" Ram  type memory left */
-  ._user_heap_stack :
-  {
-    . = ALIGN(8);
-    PROVIDE ( end = . );
-    PROVIDE ( _end = . );
-    . = . + _Min_Heap_Size;
-    . = . + _Min_Stack_Size;
-    . = ALIGN(8);
-  } >RAM
+    /* Explicitly define the heap section */
+    .heap (NOLOAD) :
+    {
+      . = ALIGN(8);
+      __heap_start__ = .;
+      . = . + 0x10000;  /* 64 KB heap */
+      __heap_end__ = .;
+    } >RAM
+
+    /* Explicitly define the stack section */
+    .stack (NOLOAD):
+    {
+      . = ALIGN(8);
+      __stack_start__ = .;
+      . = . + 0x2000;   /* 8 KB stack */
+      __stack_end__ = .;
+    } >RAM
+
+  .client_packet_pool_area :
+    {
+      . = ALIGN(32);
+      KEEP(*(.client_packet_pool_area))
+    } >POOL_AREA
 
   /* Remove information from the compiler libraries */
   /DISCARD/ :

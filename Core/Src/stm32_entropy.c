@@ -2,14 +2,16 @@
 #include "mbedtls/error.h"
 #include "stm32h5xx_hal.h"
 #include <string.h>
+#include <stdio.h>
 
 extern RNG_HandleTypeDef hrng;
 
 int mbedtls_hardware_poll(void *data,
-                                  unsigned char *output,
-                                  size_t len,
-                                  size_t *olen)
+						  unsigned char *output,
+						  size_t len,
+						  size_t *olen)
 {
+    printf("Entered mbedtls_hardware_poll to set entropy with %u bytes\r\n", len);
     (void) data; // unused
 
     uint32_t random_val;
@@ -27,6 +29,8 @@ int mbedtls_hardware_poll(void *data,
         bytes_filled += copy_len;
     }
 
+    printf("Finished filling %u entropy bytes in mbed_tls_hardware_poll...\r\n",
+           bytes_filled);
     *olen = bytes_filled;
     return 0;
 } /* mbedtls_hardware_entropy_poll */

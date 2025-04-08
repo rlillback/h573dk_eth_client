@@ -80,7 +80,8 @@
 #define MBEDTLS_ECDH_C
 #define MBEDTLS_MD_C
 #define MBEDTLS_SHA256_C
-#define MBEDTLS_SHA512_C
+#undef  MBEDTLS_SHA512_C
+#undef  MBEDTLS_SHA384_C
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
 #define MBEDTLS_HMAC_DRBG_C
@@ -101,7 +102,7 @@
 /* Debugging and self-test */
 #define MBEDTLS_SELF_TEST
 #define MBEDTLS_VERSION_C
-#define MBEDTLS_DEBUG_C
+#undef MBEDTLS_DEBUG_C
 
 /* Custom application options */
 //#define MBEDTLS_NO_DEFAULT_ENTROPY_SOURCES
