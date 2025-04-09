@@ -65,7 +65,7 @@
 		<link>
 			<name>.ethernet-</name>
 			<type>2</type>
-			<location>/Volumes/RaySanDiskPro/gitHub/rlillback/STM32CubeIDE/h573dk_eth_client/Middlewares/ST/netxduo/common/drivers/ethernet</location>
+			<location>PROJECT_LOC/Middlewares/ST/netxduo/common/drivers/ethernet</location>
 		</link>
 		<link>
 			<name>.ethernet_lan8742</name>
