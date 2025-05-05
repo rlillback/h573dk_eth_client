@@ -37,6 +37,8 @@ int configure_tls_authentication(WOLFSSL_CTX* ctx, int* error_flag)
     printf("Setting wolfSSL verify callback function...\r\n");
     wolfSSL_CTX_set_verify(ctx, WOLFSSL_VERIFY_PEER, verify_cb);
 
+#elif !defined(__HTTP__ONLY_)
+    // Do Nothing
 #else
     #error "Must have either one way or mTLS defined"
 #endif

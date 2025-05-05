@@ -85,13 +85,13 @@ void Error_Handler(void);
 #endif
 
 // Optional debug toggles
-#undef  __MSS_PACKET_DUMP__
-#undef  __DUMP_WOLFSSL_PACKETS__
-#undef  __PRINT_ALLOCATIONS__
-#undef  __PRINT_WOLF_SSL_DEBUG__
-#undef  __PRINT_HTTPS_RESPONSES__
-#undef  __PRINT_NET_RECV_DATA__
-#undef  __DUMP_CLIENT_PACKET_POOL__
+#undef  __MSS_PACKET_DUMP__				/* What is coming across the wire in the 1460 byte packets */
+#undef  __DUMP_WOLFSSL_PACKETS__        /* What is sent from the net_recv function to wolfSSL */
+#undef  __PRINT_ALLOCATIONS__           /* Print every wolfSSL malloc and free */
+#undef  __PRINT_WOLF_SSL_DEBUG__        /* Print the internal wolfSSL debug stuff up to level 3 */
+#undef  __PRINT_HTTPS_RESPONSES__       /* Print the responses from HTTP */
+#undef  __PRINT_NET_RECV_DATA__         /* Print the data inside of the net_recv -- good for seeing if memory is big enough */
+#undef  __DUMP_CLIENT_PACKET_POOL__     /* Print the http client packet pool to see if we are running out of pool space */
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
